@@ -36,3 +36,5 @@ $ veristat -vl2 -f iter_nested_deeply_iters iters.bpf.o > test.log
 $ log2dot.py test.log | xdot -
 ```
 Here, `xdot` is used for interactive visualization of the generated DOT file.
+
+<img src="example.svg" width=50%>
