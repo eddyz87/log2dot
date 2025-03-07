@@ -80,8 +80,11 @@ def read_graph(fn):
 
     with open(fn) if fn is not None else dup_stdin() as f:
         for line_num, line in enumerate(f):
-            if m := re.match(r'(?P<cline>; .* @ .*)', line):
-                cline = CLine(line_num + 1, m['cline'])
+            if m := re.match(r'(?P<cline>; .*)', line):
+                text = m['cline']
+                if cline and cline.tgt_log_line == line_num:
+                    text = cline.text + '\\l' + text
+                cline = CLine(line_num + 1, text)
             elif m := re.match(r'[ ]*'
                                r'(?P<addr>[0-9]+): '
                                r'(?P<liveregs>[0-9\.]+ )?'
