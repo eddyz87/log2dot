@@ -31,6 +31,11 @@ class CLine:
     tgt_log_line: int
     text: str
 
+@dataclass
+class Checkpoint:
+    hit: int = 0
+    miss: int = 0
+
 def dup_stdout():
     return os.fdopen(os.dup(sys.stdout.fileno()), 'w')
 
@@ -42,6 +47,8 @@ def read_graph(fn):
     bb_ends = set()
     addr2insn = {}
     cline = None
+    insn2slot = {}
+    insn2ckpt = {}
 
     def mk_insn(addr, liveregs, insn):
         if m := re.match(r'goto pc(?P<delta>[+-][0-9]+)', insn):
@@ -96,6 +103,25 @@ def read_graph(fn):
                 insn.freq += 1
                 if cline and cline.tgt_log_line == line_num:
                     insn.cline = cline.text
+            elif m := re.match(r'.* frame (?P<frame>[0-9]+) insn (?P<insn>[0-9]+), may read: (?P<may_read>.*)',
+                               line):
+                insn = int(m['insn'])
+                frame = int(m['frame'])
+                may_read = [(frame, int(slot)) for slot in m['may_read'].split(',')]
+                for slot in may_read:
+                    if insn not in insn2slot:
+                        insn2slot[insn] = set()
+                    insn2slot[insn].add(slot)
+            elif m := re.match(r'checkpoint (?P<hit_miss>hit|miss): (?P<insn>[0-9]+)', line):
+                insn = int(m['insn'])
+                if insn not in insn2ckpt:
+                    insn2ckpt[insn] = Checkpoint()
+                ckpt = insn2ckpt[insn]
+                match m['hit_miss']:
+                    case 'hit':
+                        ckpt.hit += 1
+                    case 'miss':
+                        ckpt.miss += 1
 
     insns = list(addr2insn.values())
     insns.sort(key=lambda insn: insn.addr)
@@ -124,7 +150,8 @@ def read_graph(fn):
             for s in insn.succ:
                 bb.succ.append(s)
             bb = None
-    return addr2bb
+    print(f'num bbs: {len(addr2bb)}', file=sys.stderr)
+    return addr2bb, insn2slot, insn2ckpt
 
 def count_digits(n):
     n = abs(n)
@@ -164,7 +191,9 @@ def compute_backedges(addr2bb):
                 spine.remove(v.addr)
     return backedges
 
-def graph2dot(addr2bb):
+INTERESTING_SLOTS=set([-72, -104, -128, -136, -144, -152, -160, -168, -176, -184, -200, -216,])
+
+def graph2dot(addr2bb, insn2slot, insn2ckpt):
     g = pydot.Dot("G", graph_type="digraph")
     g.set_node_defaults(shape="box", fontname="monospace",
                         colorscheme="ylorbr8", style='filled')
@@ -186,15 +215,30 @@ def graph2dot(addr2bb):
                 addr_digits = max(addr_digits, count_digits(insn.addr))
                 insn_chars = max(insn_chars, len(insn.text))
             insn_padding = insn_chars + 8
+            slots_in_block = False
             for insn in bb.insns:
                 if insn.cline:
                     out.write(f"{insn.cline}\\l")
-                out.write(f"{insn.addr:{addr_digits}}: {insn.text:{insn_padding}} {insn.freq}\\l")
+                slot_mark = ''
+                if insn.addr in insn2slot:
+                    #slots = insn2slot[insn.addr] & INTERESTING_SLOTS
+                    slots = sorted(insn2slot[insn.addr])
+                    if slots:
+                        slot_mark = " <<<<< " + ",".join([f'{frame}:{slot}' for frame, slot in slots])
+                        slots_in_block = True
+                ckpt_mark = ''
+                if insn.addr in insn2ckpt:
+                    ckpt = insn2ckpt[insn.addr]
+                    ckpt_mark = f" hit: {ckpt.hit:<3} miss: {ckpt.miss}"
+                out.write(f"{insn.addr:{addr_digits}}: {insn.text:{insn_padding}} {insn.freq}{slot_mark}{ckpt_mark}\\l")
             label = out.getvalue()
         color = math.log2(bb.max_freq)
         color = int(color // color_step)
         #print(f'bb.max_freq={bb.max_freq}, color={color}')
-        n = pydot.Node(bb.addr, label=label.replace('\\n', ''), fillcolor=color + 1)
+        if slots_in_block:
+            n = pydot.Node(bb.addr, label=label.replace('\\n', ''), fillcolor=color + 1, color=8, penwidth=10)
+        else:
+            n = pydot.Node(bb.addr, label=label.replace('\\n', ''), fillcolor=color + 1)
         g.add_node(n)
     backedges = compute_backedges(addr2bb)
     for bb in addr2bb.values():
@@ -208,8 +252,8 @@ def graph2dot(addr2bb):
     return g
 
 def log2dot(log_file, dot_file):
-    addr2bb = read_graph(log_file)
-    g = graph2dot(addr2bb)
+    addr2bb, insn2slot, insn2ckpt = read_graph(log_file)
+    g = graph2dot(addr2bb, insn2slot, insn2ckpt)
     with open(dot_file, 'w') if dot_file is not None else dup_stdout() as out:
         out.write(g.to_string())
 
