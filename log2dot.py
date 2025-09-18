@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Set
 import argparse
 import pydot
 import math
@@ -31,6 +31,12 @@ class CLine:
     tgt_log_line: int
     text: str
 
+@dataclass(frozen=True, order=True)
+class CC:
+    callchain: Tuple[int]
+    frame: int
+    addr: int
+
 def dup_stdout():
     return os.fdopen(os.dup(sys.stdout.fileno()), 'w')
 
@@ -41,6 +47,7 @@ def read_graph(fn):
     bb_starts = set([0])
     bb_ends = set()
     addr2insn = {}
+    cc2slots = {}
     cline = None
 
     def mk_insn(addr, liveregs, insn):
@@ -99,6 +106,27 @@ def read_graph(fn):
                 insn.freq += 1
                 if cline and cline.tgt_log_line == line_num:
                     insn.cline = cline.text
+            elif m := re.match(r'\((?P<callchain>[0-9,]+)\) '
+                               r'frame (?P<frame>[0-9]+) '
+                               r'insn (?P<addr>[0-9]+) '
+                               r'(?P<mode>[+-])written (?P<slots>[-0-9,]+)',
+                               line):
+                callchain = tuple(map(int, m['callchain'].split(',')))
+                frame = int(m['frame'])
+                addr = int(m['addr'])
+                mode = m['mode']
+                slots = map(int, m['slots'].split(','))
+                # print(f"callchain={callchain}, frame={frame}, insn={insn}, mode={mode}, slots={slots}",
+                #       file=sys.stderr)
+                cc = CC(callchain, frame, addr)
+                if cc not in cc2slots:
+                    cc2slots[cc] = set()
+                slot_set = cc2slots[cc]
+                for slot in slots:
+                    match mode:
+                        case '+': slot_set.add(slot)
+                        case '-': slot_set.remove(slot)
+
 
     insns = list(addr2insn.values())
     insns.sort(key=lambda insn: insn.addr)
@@ -127,7 +155,7 @@ def read_graph(fn):
             for s in insn.succ:
                 bb.succ.append(s)
             bb = None
-    return addr2bb
+    return addr2bb, cc2slots
 
 def count_digits(n):
     n = abs(n)
@@ -167,7 +195,24 @@ def compute_backedges(addr2bb):
                 spine.remove(v.addr)
     return backedges
 
-def graph2dot(addr2bb):
+def graph2dot(addr2bb, cc2slots):
+    addr2slots = {}
+    for cc, slots in cc2slots.items():
+        if cc.addr not in addr2slots:
+            addr2slots[cc.addr] = list()
+        addr2slots[cc.addr].append((cc, slots))
+    for addr, cc_slots in addr2slots.items():
+        with io.StringIO() as out:
+            cc_slots.sort()
+            prev_callchain = None
+            for cc, slots in cc_slots:
+                if prev_callchain != cc.callchain:
+                    out.write(f' {cc.callchain}')
+                    prev_callchain = cc.callchain
+                out.write(f' [{cc.frame}] {sorted(slots)}')
+            txt = out.getvalue()
+            addr2slots[addr] = ('wr' + txt) if txt else ''
+
     g = pydot.Dot("G", graph_type="digraph")
     g.set_node_defaults(shape="box", fontname="monospace",
                         colorscheme="ylorbr8", style='filled')
@@ -192,7 +237,10 @@ def graph2dot(addr2bb):
             for insn in bb.insns:
                 if insn.cline:
                     out.write(f"{insn.cline}\\l")
-                out.write(f"{insn.addr:{addr_digits}}: {insn.text:{insn_padding}} {insn.freq}\\l")
+                slots = ''
+                if insn.addr in addr2slots:
+                    slots = f'   {addr2slots[insn.addr]:}'
+                out.write(f"{insn.addr:{addr_digits}}: {insn.text:{insn_padding}} {insn.freq}{slots}\\l")
             label = out.getvalue()
         color = math.log2(bb.max_freq)
         color = int(color // color_step)
@@ -211,8 +259,8 @@ def graph2dot(addr2bb):
     return g
 
 def log2dot(log_file, dot_file):
-    addr2bb = read_graph(log_file)
-    g = graph2dot(addr2bb)
+    addr2bb, cc2slots = read_graph(log_file)
+    g = graph2dot(addr2bb, cc2slots)
     with open(dot_file, 'w') if dot_file is not None else dup_stdout() as out:
         out.write(g.to_string())
 
