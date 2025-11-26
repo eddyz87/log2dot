@@ -83,6 +83,7 @@ def read_graph(fn):
             if m := re.match(r'(?P<cline>; .* @ .*)', line):
                 cline = CLine(line_num + 1, m['cline'])
             elif m := re.match(r'[ ]*'
+                               r'((?P<scc>[0-9]+)[ ]+)?'
                                r'(?P<addr>[0-9]+): '
                                r'(?P<liveregs>[0-9\.]+ )?'
                                r'\([0-9a-f]+\) (?P<insn>[^\n;]*)'
